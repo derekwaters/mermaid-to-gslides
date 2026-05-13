@@ -1,0 +1,41 @@
+flowchart TD
+    %% External Top
+    LB[Load Balancing] --- Cluster
+
+    subgraph Cluster
+        direction TB
+        App[Application]
+        
+        subgraph Internal_Configs [ ]
+            direction TB
+            RBAC[Namespacing / PERMS / RBACs]
+            Secrets[Secrets]
+            PodNet[Pod Networking]
+        end
+
+        %% Internal Connections
+        App <--> RBAC
+        App <--> Secrets
+        App <--> PodNet
+        
+        CSI[CSI] --- App
+        ECR[Image Store / ECR]
+    end
+
+    %% External Right Side
+    App <--> Auth[Auth]
+    App <--> MQ[MQ / Messaging<br/>to OCP]
+    App <--> DB[RDS / Dynamo Database<br/>to OCP]
+    App --> S3[Storage S3<br/>3rd Party Compatibility]
+    
+    %% External Bottom/Other
+    App --> VPC[VPC]
+    Storage[Storage] --- CSI
+    ECR --> CloudAuth[cloud specifics<br/>12 hr auth]
+    
+    %% Floating Node
+    Serverless[Serverless Functions<br/>to OCP]
+
+    %% Styling
+    style Cluster fill:#f9f9f9,stroke:#333,stroke-width:2px
+    style Internal_Configs fill:none,stroke:none
