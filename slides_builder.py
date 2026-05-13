@@ -4,7 +4,7 @@ Uses Google Slides API with OAuth2 credentials.
 """
 from __future__ import annotations
 
-from mermaid_parser import MermaidDiagram, Node
+from mermaid_parser import MermaidDiagram, Node, Subgraph
 from layout import layout_diagram, get_node_size_emu
 
 # Shape type mapping: Mermaid shape -> Google Slides API shape type
@@ -21,6 +21,7 @@ SHAPE_TYPE_MAP = {
 _INCH_EMU = 914_400
 _LABEL_W_EMU = int(0.8 * _INCH_EMU)
 _LABEL_H_EMU = int(0.25 * _INCH_EMU)
+_SG_PADDING_EMU = int(0.25 * _INCH_EMU)  # padding around subgraph node cluster
 
 
 def _make_object_id(prefix: str, suffix: str) -> str:
@@ -64,16 +65,94 @@ def _connection_sites(direction: str) -> tuple[int, int]:
 
 def _line_properties(style: str, from_site: int, to_site: int, from_obj: str, to_obj: str) -> dict:
     dash = "DOT" if style == "dotted" else "SOLID"
-    # ~0.75pt default; ~2.25pt for thick (in EMU: 1pt = 12700)
-    weight = 3 * 12700 if style == "thick" else 12700
+    weight = 3 * 12700 if style == "thick" else 12700  # ~2.25pt vs ~1pt in EMU
     end_arrow = "NONE" if style == "line" else "OPEN_ARROW"
+    start_arrow = "OPEN_ARROW" if style == "bidirectional" else "NONE"
     return {
         "startConnection": {"connectedObjectId": from_obj, "connectionSiteIndex": from_site},
         "endConnection": {"connectedObjectId": to_obj, "connectionSiteIndex": to_site},
         "dashStyle": dash,
         "weight": {"magnitude": weight, "unit": "EMU"},
         "endArrow": end_arrow,
+        "startArrow": start_arrow,
     }
+
+
+def _subgraph_requests(
+    page_id: str,
+    sg: Subgraph,
+    positions: dict[str, tuple[int, int]],
+    node_w: int,
+    node_h: int,
+) -> list[dict]:
+    """Create a background rectangle with label for a subgraph cluster."""
+    sg_positions = [positions[nid] for nid in sg.node_ids if nid in positions]
+    if not sg_positions:
+        return []
+
+    min_cx = min(cx for cx, _ in sg_positions)
+    max_cx = max(cx for cx, _ in sg_positions)
+    min_cy = min(cy for _, cy in sg_positions)
+    max_cy = max(cy for _, cy in sg_positions)
+
+    box_x = min_cx - node_w // 2 - _SG_PADDING_EMU
+    box_y = min_cy - node_h // 2 - _SG_PADDING_EMU
+    box_w = (max_cx + node_w // 2 + _SG_PADDING_EMU) - box_x
+    box_h = (max_cy + node_h // 2 + _SG_PADDING_EMU) - box_y
+
+    box_id = _make_object_id("sg", sg.id)
+    reqs: list[dict] = [
+        {
+            "createShape": {
+                "objectId": box_id,
+                "shapeType": "RECTANGLE",
+                "elementProperties": {
+                    "pageObjectId": page_id,
+                    "size": _size_emu(box_w, box_h),
+                    "transform": {
+                        "scaleX": 1,
+                        "scaleY": 1,
+                        "translateX": box_x,
+                        "translateY": box_y,
+                        "unit": "EMU",
+                    },
+                },
+            },
+        },
+        {
+            "updateShapeProperties": {
+                "objectId": box_id,
+                "shapeProperties": {
+                    "shapeBackgroundFill": {
+                        "solidFill": {
+                            "color": {"rgbColor": {"red": 0.96, "green": 0.96, "blue": 0.98}},
+                            "alpha": 0.9,
+                        },
+                    },
+                    "outline": {
+                        "outlineFill": {
+                            "solidFill": {
+                                "color": {"rgbColor": {"red": 0.2, "green": 0.2, "blue": 0.2}},
+                            },
+                        },
+                        "weight": {"magnitude": 12700, "unit": "EMU"},
+                        "dashStyle": "SOLID",
+                    },
+                    "contentAlignment": "TOP",
+                },
+                "fields": "shapeBackgroundFill,outline,contentAlignment",
+            },
+        },
+    ]
+    if sg.label:
+        reqs.append({
+            "insertText": {
+                "objectId": box_id,
+                "text": sg.label,
+                "insertionIndex": 0,
+            },
+        })
+    return reqs
 
 
 def build_requests(
@@ -87,9 +166,13 @@ def build_requests(
     positions = layout_diagram(diagram)
     w_emu, h_emu = get_node_size_emu()
     from_site, to_site = _connection_sites(diagram.direction)
-    requests: list[dict] = []
 
-    # 1) Create shapes for each node
+    # Subgraph background boxes come first so they render behind node shapes
+    bg_requests: list[dict] = []
+    for sg in diagram.subgraphs:
+        bg_requests.extend(_subgraph_requests(page_object_id, sg, positions, w_emu, h_emu))
+
+    node_requests: list[dict] = []
     for node in diagram.nodes:
         pos = positions.get(node.id)
         if not pos:
@@ -97,7 +180,7 @@ def build_requests(
         cx, cy = pos
         object_id = _make_object_id("node", node.id)
         shape_type = SHAPE_TYPE_MAP.get(node.shape, "RECTANGLE")
-        requests.append({
+        node_requests.append({
             "createShape": {
                 "objectId": object_id,
                 "shapeType": shape_type,
@@ -108,7 +191,7 @@ def build_requests(
                 },
             },
         })
-        requests.append({
+        node_requests.append({
             "insertText": {
                 "objectId": object_id,
                 "text": node.label[:100],
@@ -116,7 +199,7 @@ def build_requests(
             },
         })
 
-    # 2) Create connector lines between shapes
+    edge_requests: list[dict] = []
     line_counter = [0]
 
     def next_line_id() -> str:
@@ -127,7 +210,7 @@ def build_requests(
         from_obj = _make_object_id("node", edge.from_id)
         to_obj = _make_object_id("node", edge.to_id)
         line_id = next_line_id()
-        requests.append({
+        edge_requests.append({
             "createLine": {
                 "objectId": line_id,
                 "lineCategory": "STRAIGHT",
@@ -144,15 +227,14 @@ def build_requests(
                 },
             },
         })
-        requests.append({
+        edge_requests.append({
             "updateLineProperties": {
                 "objectId": line_id,
                 "lineProperties": _line_properties(edge.style, from_site, to_site, from_obj, to_obj),
-                "fields": "startConnection,endConnection,dashStyle,weight,endArrow",
+                "fields": "startConnection,endConnection,dashStyle,weight,endArrow,startArrow",
             },
         })
 
-        # Render edge label as a text box at the connector midpoint
         if edge.label:
             from_pos = positions.get(edge.from_id)
             to_pos = positions.get(edge.to_id)
@@ -160,7 +242,7 @@ def build_requests(
                 mx = (from_pos[0] + to_pos[0]) // 2
                 my = (from_pos[1] + to_pos[1]) // 2
                 lbl_id = _make_object_id("lbl", str(line_counter[0]))
-                requests.append({
+                edge_requests.append({
                     "createShape": {
                         "objectId": lbl_id,
                         "shapeType": "TEXT_BOX",
@@ -171,7 +253,7 @@ def build_requests(
                         },
                     },
                 })
-                requests.append({
+                edge_requests.append({
                     "insertText": {
                         "objectId": lbl_id,
                         "text": edge.label[:50],
@@ -179,7 +261,7 @@ def build_requests(
                     },
                 })
 
-    return requests
+    return bg_requests + node_requests + edge_requests
 
 
 def create_diagram_slide(service, presentation_id: str, diagram: MermaidDiagram) -> str | None:
