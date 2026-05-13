@@ -102,7 +102,7 @@ def build_requests(
             "createLine": {
                 "objectId": line_id,
                 "lineCategory": "STRAIGHT",
-                "lineType": "STRAIGHT_CONNECTOR_1",
+                # "lineType": "STRAIGHT_CONNECTOR_1",
                 "elementProperties": {
                     "pageObjectId": page_object_id,
                     "size": _size_emu(1, 1),
@@ -130,14 +130,14 @@ def build_requests(
                         "connectionSiteIndex": 3,
                     },
                 },
-                "fields": "lineProperties.startConnection,lineProperties.endConnection",
+                "fields": "startConnection,endConnection",
             },
         })
-        requests.append({
-            "rerouteLine": {
-                "objectId": line_id,
-            },
-        })
+#        requests.append({
+#            "rerouteLine": {
+#                "objectId": line_id,
+#            },
+#        })
 
     return requests
 
@@ -168,6 +168,7 @@ def create_diagram_slide(service, presentation_id: str, diagram: MermaidDiagram)
     page_id = create_reply["createSlide"]["objectId"]
 
     requests = build_requests(diagram, page_id)
+    print(requests[13])
     if not requests:
         return page_id
     service.presentations().batchUpdate(
