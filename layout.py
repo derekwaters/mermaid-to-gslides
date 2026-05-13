@@ -54,9 +54,9 @@ def _assign_layers(
     # BFS from all sources (in-degree 0)
     in_degree = {nid: len(pred[nid]) for nid in node_ids}
     layers: dict[str, int] = {}
-    q: deque[tuple[str, int]] = deque((nid, 0) for nid in node_ids if in_degree[nid] == 0)
+    q: deque[tuple[str, int]] = deque()
     for nid in node_ids:
-        if in_degree[nid] == 0 and nid not in layers:
+        if in_degree[nid] == 0:
             q.append((nid, 0))
     while q:
         nid, layer = q.popleft()
@@ -121,11 +121,8 @@ def layout_diagram(diagram: MermaidDiagram) -> dict[str, tuple[int, int]]:
             start_x = margin_x + (content_width - row_width) // 2 if row_width < content_width else margin_x
             for i, nid in enumerate(nodes_in_layer):
                 x = start_x + i * (NODE_WIDTH_EMU + H_SPACING_EMU) + NODE_WIDTH_EMU // 2
-                if diagram.direction == "BT":
-                    row_idx = n_layers - 1 - layer_idx
-                    y = margin_y + row_idx * row_height + NODE_HEIGHT_EMU // 2
-                else:
-                    y = start_y + layer_idx * row_height + NODE_HEIGHT_EMU // 2
+                row_idx = (n_layers - 1 - layer_idx) if diagram.direction == "BT" else layer_idx
+                y = start_y + row_idx * row_height + NODE_HEIGHT_EMU // 2
                 positions[nid] = (x, y)
     else:
         # LR or RL: layers are columns

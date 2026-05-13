@@ -43,9 +43,9 @@ class MermaidDiagram:
 NODE_PATTERNS = [
     (re.compile(r"([a-zA-Z0-9_]+)\s*\[\s*([^\]\\]*?)\s*\]"), "rect"),       # [text]
     (re.compile(r"([a-zA-Z0-9_]+)\s*\(\s*\(\s*([^)]*?)\s*\)\s*\)"), "circle"),  # ((text)) - before round
-    (re.compile(r"([a-zA-Z0-9_]+)\s*\(\s*([^)]*?)\s*\)"), "round"),         # (text) - round
+    (re.compile(r"([a-zA-Z0-9_]+)\s*\(\s*(?!\()([^)]*?)\s*\)"), "round"),    # (text) - round, not ((
     (re.compile(r"([a-zA-Z0-9_]+)\s*\{\s*\{\s*([^}]*?)\s*\}\s*\}"), "hexagon"), # {{text}} - before diamond
-    (re.compile(r"([a-zA-Z0-9_]+)\s*\{\s*([^}]*?)\s*\}"), "diamond"),       # {text}
+    (re.compile(r"([a-zA-Z0-9_]+)\s*\{\s*(?!\{)([^}]*?)\s*\}"), "diamond"), # {text} - diamond, not {{
     (re.compile(r"([a-zA-Z0-9_]+)\s*\[\s*/\s*([^\\]+)\s*\\\s*\]"), "trapezoid"),  # [/text\]
     (re.compile(r"([a-zA-Z0-9_]+)\s*\[\s*\\\\s*([^/]+)\s*/\s*\]"), "trapezoid"),  # [\text/] (backslash)
     (re.compile(r"([a-zA-Z0-9_]+)\s*\[\s*/\s*([^/]+)\s*/\s*\]"), "parallelogram"), # [/text/]
@@ -191,7 +191,8 @@ def parse_mermaid(source: str) -> MermaidDiagram:
             next_conn = connector_re.search(part, right_start)
             right_end = next_conn.start() if next_conn else len(part)
             right = part[right_start:right_end].strip()
-            from_id = re.match(r"([a-zA-Z0-9_]+)", left).group(1) if left else None
+            m_from = re.search(r"([a-zA-Z0-9_]+)(?:\s*(?:\[[^\]]*\]|\(+[^)]*\)+|\{+[^}]*\}+))?\s*$", left)
+            from_id = m_from.group(1) if m_from else None
             to_id = re.match(r"([a-zA-Z0-9_]+)", right).group(1) if right else None
             if from_id and to_id:
                 _parse_node_def(diagram, from_id)

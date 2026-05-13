@@ -5,7 +5,7 @@ Uses Google Slides API with OAuth2 credentials.
 from __future__ import annotations
 
 from mermaid_parser import MermaidDiagram, Node
-from layout import layout_diagram, get_node_size_emu, SLIDE_WIDTH_EMU, SLIDE_HEIGHT_EMU
+from layout import layout_diagram, get_node_size_emu
 
 # Shape type mapping: Mermaid shape -> Google Slides API shape type
 SHAPE_TYPE_MAP = {
@@ -17,6 +17,10 @@ SHAPE_TYPE_MAP = {
     "trapezoid": "TRAPEZOID",
     "parallelogram": "PARALLELOGRAM",
 }
+
+_INCH_EMU = 914_400
+_LABEL_W_EMU = int(0.8 * _INCH_EMU)
+_LABEL_H_EMU = int(0.25 * _INCH_EMU)
 
 
 def _make_object_id(prefix: str, suffix: str) -> str:
@@ -33,8 +37,7 @@ def _size_emu(w_emu: int, h_emu: int) -> dict:
 
 
 def _transform_emu(cx_emu: int, cy_emu: int, w_emu: int, h_emu: int) -> dict:
-    """AffineTransform: translate so center (cx, cy) becomes top-left of element (scale 1)."""
-    # Top-left of shape = center - half size
+    """AffineTransform placing the shape's center at (cx, cy)."""
     tx = cx_emu - w_emu // 2
     ty = cy_emu - h_emu // 2
     return {
@@ -43,6 +46,33 @@ def _transform_emu(cx_emu: int, cy_emu: int, w_emu: int, h_emu: int) -> dict:
         "translateX": tx,
         "translateY": ty,
         "unit": "EMU",
+    }
+
+
+def _connection_sites(direction: str) -> tuple[int, int]:
+    """Return (from_site, to_site) connection site indices for the diagram direction.
+    Site indices: 0=top, 1=right, 2=bottom, 3=left."""
+    if direction == "TD":
+        return 2, 0  # bottom of source → top of destination
+    elif direction == "BT":
+        return 0, 2  # top → bottom
+    elif direction == "RL":
+        return 3, 1  # left → right
+    else:  # LR
+        return 1, 3  # right → left
+
+
+def _line_properties(style: str, from_site: int, to_site: int, from_obj: str, to_obj: str) -> dict:
+    dash = "DOT" if style == "dotted" else "SOLID"
+    # ~0.75pt default; ~2.25pt for thick (in EMU: 1pt = 12700)
+    weight = 3 * 12700 if style == "thick" else 12700
+    end_arrow = "NONE" if style == "line" else "OPEN_ARROW"
+    return {
+        "startConnection": {"connectedObjectId": from_obj, "connectionSiteIndex": from_site},
+        "endConnection": {"connectedObjectId": to_obj, "connectionSiteIndex": to_site},
+        "dashStyle": dash,
+        "weight": {"magnitude": weight, "unit": "EMU"},
+        "endArrow": end_arrow,
     }
 
 
@@ -56,6 +86,7 @@ def build_requests(
     """
     positions = layout_diagram(diagram)
     w_emu, h_emu = get_node_size_emu()
+    from_site, to_site = _connection_sites(diagram.direction)
     requests: list[dict] = []
 
     # 1) Create shapes for each node
@@ -77,7 +108,6 @@ def build_requests(
                 },
             },
         })
-        # Insert text (must be separate request)
         requests.append({
             "insertText": {
                 "objectId": object_id,
@@ -87,22 +117,20 @@ def build_requests(
         })
 
     # 2) Create connector lines between shapes
-    line_index = [0]
+    line_counter = [0]
 
     def next_line_id() -> str:
-        line_index[0] += 1
-        return _make_object_id("line", str(line_index[0]))
+        line_counter[0] += 1
+        return _make_object_id("line", str(line_counter[0]))
 
     for edge in diagram.edges:
         from_obj = _make_object_id("node", edge.from_id)
         to_obj = _make_object_id("node", edge.to_id)
         line_id = next_line_id()
-        # Create line with placeholder position; we'll attach with UpdateLineProperties + RerouteLine
         requests.append({
             "createLine": {
                 "objectId": line_id,
                 "lineCategory": "STRAIGHT",
-                # "lineType": "STRAIGHT_CONNECTOR_1",
                 "elementProperties": {
                     "pageObjectId": page_object_id,
                     "size": _size_emu(1, 1),
@@ -116,28 +144,40 @@ def build_requests(
                 },
             },
         })
-        # Attach connector to shapes (connection site: 0=top, 1=right, 2=bottom, 3=left)
         requests.append({
             "updateLineProperties": {
                 "objectId": line_id,
-                "lineProperties": {
-                    "startConnection": {
-                        "connectedObjectId": from_obj,
-                        "connectionSiteIndex": 1,
-                    },
-                    "endConnection": {
-                        "connectedObjectId": to_obj,
-                        "connectionSiteIndex": 3,
-                    },
-                },
-                "fields": "startConnection,endConnection",
+                "lineProperties": _line_properties(edge.style, from_site, to_site, from_obj, to_obj),
+                "fields": "startConnection,endConnection,dashStyle,weight,endArrow",
             },
         })
-#        requests.append({
-#            "rerouteLine": {
-#                "objectId": line_id,
-#            },
-#        })
+
+        # Render edge label as a text box at the connector midpoint
+        if edge.label:
+            from_pos = positions.get(edge.from_id)
+            to_pos = positions.get(edge.to_id)
+            if from_pos and to_pos:
+                mx = (from_pos[0] + to_pos[0]) // 2
+                my = (from_pos[1] + to_pos[1]) // 2
+                lbl_id = _make_object_id("lbl", str(line_counter[0]))
+                requests.append({
+                    "createShape": {
+                        "objectId": lbl_id,
+                        "shapeType": "TEXT_BOX",
+                        "elementProperties": {
+                            "pageObjectId": page_object_id,
+                            "size": _size_emu(_LABEL_W_EMU, _LABEL_H_EMU),
+                            "transform": _transform_emu(mx, my, _LABEL_W_EMU, _LABEL_H_EMU),
+                        },
+                    },
+                })
+                requests.append({
+                    "insertText": {
+                        "objectId": lbl_id,
+                        "text": edge.label[:50],
+                        "insertionIndex": 0,
+                    },
+                })
 
     return requests
 
@@ -146,18 +186,9 @@ def create_diagram_slide(service, presentation_id: str, diagram: MermaidDiagram)
     """
     Create a new blank slide, add the diagram to it, and return the new slide's object ID.
     """
-    # Create blank slide
-    pres = service.presentations().get(presentationId=presentation_id).execute()
-    slides = pres.get("slides", [])
-    # Use first slide's page or create new one
-    create_slide = {
-        "createSlide": {
-            "slideLayoutReference": {"predefinedLayout": "BLANK"},
-        },
-    }
     resp = service.presentations().batchUpdate(
         presentationId=presentation_id,
-        body={"requests": [create_slide]},
+        body={"requests": [{"createSlide": {"slideLayoutReference": {"predefinedLayout": "BLANK"}}}]},
     ).execute()
     create_reply = next(
         (r for r in resp.get("replies", []) if "createSlide" in r),
@@ -168,7 +199,6 @@ def create_diagram_slide(service, presentation_id: str, diagram: MermaidDiagram)
     page_id = create_reply["createSlide"]["objectId"]
 
     requests = build_requests(diagram, page_id)
-    print(requests[13])
     if not requests:
         return page_id
     service.presentations().batchUpdate(
